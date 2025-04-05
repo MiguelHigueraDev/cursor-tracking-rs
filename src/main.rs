@@ -42,15 +42,28 @@ impl SharedState {
         self.used_ids.remove(&id);
         self.clients.remove(&id);
     }
+
+    async fn broadcast_user_list(&mut self) {
+        let user_ids: Vec<ClientId> = self.used_ids.iter().copied().collect();
+        let mut msg = vec![MessageType::InitialUserList.as_byte()];
+        msg.extend(user_ids);
+
+        for (_, stream) in &mut self.clients {
+            if let Err(e) = stream.send(Message::Binary(msg.clone().into())).await {
+                eprintln!("Failed to send user list: {}", e);
+            }
+        }
+    }
 }
 
 #[repr(u8)]
 #[derive(Copy, Clone)]
 enum MessageType {
     InitialConnection = 0x01,
-    UserJoined = 0x02,
-    UserLeft = 0x03,
-    UserMovedCursor = 0x04,
+    InitialUserList = 0x02,
+    UserJoined = 0x03,
+    UserLeft = 0x04,
+    UserMovedCursor = 0x05,
 }
 
 impl MessageType {
@@ -101,6 +114,27 @@ async fn handle_connection(
     };
 
     println!("Client {} connected", client_id);
+
+    let mut ws = {
+        let mut state_lock = state.lock().await;
+        state_lock.clients.remove(&client_id).unwrap()
+    };
+
+    // Send the initial connection message to the client
+    // Contains the message header and the client ID (2 bytes)
+    let init_msg = vec![MessageType::InitialConnection.as_byte(), client_id];
+    if let Err(e) = ws.send(Message::Binary(init_msg.into())).await {
+        eprintln!("Failed to send initial connection message: {}", e);
+        return;
+    }
+
+    // Broadcast the user list to all clients
+    // This is done after the initial message to avoid sending an empty list
+    {
+        let mut state_lock = state.lock().await;
+        state_lock.clients.insert(client_id, ws);
+        state_lock.broadcast_user_list().await;
+    }
 
     let mut ws = {
         let mut state_lock = state.lock().await;
