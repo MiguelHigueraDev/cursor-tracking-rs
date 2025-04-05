@@ -1,7 +1,48 @@
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+};
+
 use futures_util::{SinkExt, StreamExt};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use uuid::Uuid;
+
+type ClientId = u8;
+type WsStream = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+struct SharedState {
+    used_ids: HashSet<ClientId>,
+    clients: HashMap<ClientId, WsStream>,
+}
+
+impl SharedState {
+    fn new() -> Self {
+        Self {
+            used_ids: HashSet::new(),
+            clients: HashMap::new(),
+        }
+    }
+
+    fn get_next_id(&self) -> Option<ClientId> {
+        for id in 0..=u8::MAX {
+            if !self.used_ids.contains(&id) {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    fn register(&mut self, id: ClientId, stream: WsStream) {
+        self.used_ids.insert(id);
+        self.clients.insert(id, stream);
+    }
+
+    fn unregister(&mut self, id: ClientId) {
+        self.used_ids.remove(&id);
+        self.clients.remove(&id);
+    }
+}
 
 #[repr(u8)]
 #[derive(Copy, Clone)]
@@ -19,56 +60,66 @@ impl MessageType {
 }
 
 #[tokio::main]
-async fn main() -> tokio::io::Result<()> {
-    let addr = "127.0.0.1:8080";
-    let listener = TcpListener::bind(&addr).await?;
-    println!("WebSocket server listening on: {}", addr);
+async fn main() {
+    let state = Arc::new(Mutex::new(SharedState::new()));
+    let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+    println!("WebSocket server running on ws://127.0.0.1:8080");
 
     while let Ok((stream, addr)) = listener.accept().await {
-        println!("New connection from {}", addr);
-
+        let state = Arc::clone(&state);
         tokio::spawn(async move {
-            let ws_stream = accept_async(stream)
-                .await
-                .expect("Error during the websocket handshake");
-            println!("WebSocket connection established: {}", addr);
-
-            let (mut write, mut read) = ws_stream.split();
-
-            // Send UUID to the client on initial connection
-            let uuid_bytes = generate_uuid_bytes();
-            let mut payload = Vec::with_capacity(1 + uuid_bytes.len());
-            payload.push(MessageType::InitialConnection.as_byte());
-            payload.extend_from_slice(&uuid_bytes);
-
-            let response = Message::Binary(payload.into());
-            if let Err(e) = write.send(response).await {
-                println!("Failed to send initial UUID: {}", e);
-                return;
-            }
-
-            // Echo incoming messages back to the client
-            while let Some(message) = read.next().await {
-                match message {
-                    Ok(msg) => {
-                        if msg.is_text() || msg.is_binary() {
-                            write.send(msg).await.expect("Failed to send message");
-                        }
-                    }
-                    Err(e) => {
-                        println!("Error processing message: {}", e);
-                        break;
-                    }
-                }
-            }
-
-            println!("Connection closed: {}", addr);
+            handle_connection(stream, addr, state).await;
         });
     }
-
-    Ok(())
 }
 
-fn generate_uuid_bytes() -> [u8; 16] {
-    *Uuid::new_v4().as_bytes()
+async fn handle_connection(
+    stream: tokio::net::TcpStream,
+    _addr: SocketAddr,
+    state: Arc<Mutex<SharedState>>,
+) {
+    let ws_stream = match accept_async(stream).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            eprintln!("Error during WebSocket handshake: {}", e);
+            return;
+        }
+    };
+
+    let client_id = {
+        let mut state_lock = state.lock().await;
+        match state_lock.get_next_id() {
+            Some(id) => {
+                state_lock.register(id, ws_stream);
+                id
+            }
+            None => {
+                eprintln!("Server is full, rejecting connection.");
+                return;
+            }
+        }
+    };
+
+    println!("Client {} connected", client_id);
+
+    let mut ws = {
+        let mut state_lock = state.lock().await;
+        state_lock.clients.remove(&client_id).unwrap()
+    };
+
+    while let Some(Ok(msg)) = ws.next().await {
+        if msg.is_text() || msg.is_binary() {
+            println!("Received from client {}: {:?}", client_id, msg);
+            ws.send(Message::Text(
+                format!("Echo from server: {}", msg.into_text().unwrap()).into(),
+            ))
+            .await
+            .unwrap();
+        }
+    }
+
+    println!("Client {} disconnected", client_id);
+
+    let mut state_lock = state.lock().await;
+    state_lock.unregister(client_id);
 }
