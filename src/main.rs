@@ -115,9 +115,19 @@ async fn handle_connection(
 
     println!("Client {} connected", client_id);
 
+    async fn send_binary_message(
+        sender: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+            Message,
+        >,
+        data: Vec<u8>,
+    ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+        sender.send(Message::Binary(data.into())).await
+    }
+
     // Send the initial connection message to the client
     let init_msg = vec![MessageType::InitialConnection.as_byte(), client_id];
-    if let Err(e) = ws_sender.send(Message::Binary(init_msg.into())).await {
+    if let Err(e) = send_binary_message(&mut ws_sender, init_msg).await {
         eprintln!("Error sending initial message: {}", e);
         return;
     }
@@ -130,7 +140,7 @@ async fn handle_connection(
 
     let mut user_list_msg = vec![MessageType::InitialUserList.as_byte()];
     user_list_msg.extend(user_list.iter().copied());
-    if let Err(e) = ws_sender.send(Message::Binary(user_list_msg.into())).await {
+    if let Err(e) = send_binary_message(&mut ws_sender, user_list_msg).await {
         eprintln!("Error sending user list: {}", e);
         return;
     }
@@ -151,7 +161,7 @@ async fn handle_connection(
                         ServerMessage::UserJoined(id) => {
                             if id != client_id {
                                 let msg = vec![MessageType::UserJoined.as_byte(), id];
-                                if let Err(e) = ws_sender.send(Message::Binary(msg.into())).await {
+                                if let Err(e) = send_binary_message(&mut ws_sender, msg).await {
                                     eprintln!("Error sending join message: {}", e);
                                     break;
                                 }
@@ -160,7 +170,7 @@ async fn handle_connection(
                         ServerMessage::UserLeft(id) => {
                             if id != client_id {
                                 let msg = vec![MessageType::UserLeft.as_byte(), id];
-                                if let Err(e) = ws_sender.send(Message::Binary(msg.into())).await {
+                                if let Err(e) = send_binary_message(&mut ws_sender, msg).await {
                                     eprintln!("Error sending leave message: {}", e);
                                     break;
                                 }
@@ -169,7 +179,7 @@ async fn handle_connection(
                         ServerMessage::UserList(ids) => {
                             let mut msg = vec![MessageType::InitialUserList.as_byte()];
                             msg.extend(ids);
-                            if let Err(e) = ws_sender.send(Message::Binary(msg.into())).await {
+                            if let Err(e) = send_binary_message(&mut ws_sender, msg).await {
                                 eprintln!("Error sending user list: {}", e);
                                 break;
                             }
@@ -179,7 +189,7 @@ async fn handle_connection(
                                 let mut msg = vec![MessageType::UserMovedCursor.as_byte(), id];
                                 msg.extend_from_slice(&x.to_be_bytes());
                                 msg.extend_from_slice(&y.to_be_bytes());
-                                if let Err(e) = ws_sender.send(Message::Binary(msg.into())).await {
+                                if let Err(e) = send_binary_message(&mut ws_sender, msg).await {
                                     eprintln!("Error sending cursor message: {}", e);
                                     break;
                                 }
