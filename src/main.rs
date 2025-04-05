@@ -1,26 +1,30 @@
-use std::{
-    collections::{HashMap, HashSet},
-    net::SocketAddr,
-    sync::Arc,
-};
+use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, broadcast, mpsc},
+};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 type ClientId = u8;
-type WsStream = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+#[derive(Clone, Debug)]
+enum ServerMessage {
+    UserJoined(ClientId),
+    UserLeft(ClientId),
+    UserList(Vec<ClientId>),
+    CursorMoved(ClientId, u16, u16),
+}
 
 struct SharedState {
     used_ids: HashSet<ClientId>,
-    clients: HashMap<ClientId, WsStream>,
 }
 
 impl SharedState {
     fn new() -> Self {
         Self {
             used_ids: HashSet::new(),
-            clients: HashMap::new(),
         }
     }
 
@@ -33,26 +37,16 @@ impl SharedState {
         None
     }
 
-    fn register(&mut self, id: ClientId, stream: WsStream) {
+    fn register(&mut self, id: ClientId) {
         self.used_ids.insert(id);
-        self.clients.insert(id, stream);
     }
 
     fn unregister(&mut self, id: ClientId) {
         self.used_ids.remove(&id);
-        self.clients.remove(&id);
     }
 
-    async fn broadcast_user_list(&mut self) {
-        let user_ids: Vec<ClientId> = self.used_ids.iter().copied().collect();
-        let mut msg = vec![MessageType::InitialUserList.as_byte()];
-        msg.extend(user_ids);
-
-        for (_, stream) in &mut self.clients {
-            if let Err(e) = stream.send(Message::Binary(msg.clone().into())).await {
-                eprintln!("Failed to send user list: {}", e);
-            }
-        }
+    fn get_user_list(&self) -> Vec<ClientId> {
+        self.used_ids.iter().copied().collect()
     }
 }
 
@@ -75,13 +69,16 @@ impl MessageType {
 #[tokio::main]
 async fn main() {
     let state = Arc::new(Mutex::new(SharedState::new()));
+    let (broadcast_tx, _) = broadcast::channel::<ServerMessage>(100);
+
     let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
     println!("WebSocket server running on ws://127.0.0.1:8080");
 
     while let Ok((stream, addr)) = listener.accept().await {
         let state = Arc::clone(&state);
+        let broadcast_tx = broadcast_tx.clone();
         tokio::spawn(async move {
-            handle_connection(stream, addr, state).await;
+            handle_connection(stream, addr, state, broadcast_tx).await;
         });
     }
 }
@@ -90,6 +87,7 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     _addr: SocketAddr,
     state: Arc<Mutex<SharedState>>,
+    broadcast_tx: broadcast::Sender<ServerMessage>,
 ) {
     let ws_stream = match accept_async(stream).await {
         Ok(ws) => ws,
@@ -99,11 +97,13 @@ async fn handle_connection(
         }
     };
 
+    let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+
     let client_id = {
         let mut state_lock = state.lock().await;
         match state_lock.get_next_id() {
             Some(id) => {
-                state_lock.register(id, ws_stream);
+                state_lock.register(id);
                 id
             }
             None => {
@@ -115,45 +115,121 @@ async fn handle_connection(
 
     println!("Client {} connected", client_id);
 
-    let mut ws = {
-        let mut state_lock = state.lock().await;
-        state_lock.clients.remove(&client_id).unwrap()
-    };
-
     // Send the initial connection message to the client
-    // Contains the message header and the client ID (2 bytes)
     let init_msg = vec![MessageType::InitialConnection.as_byte(), client_id];
-    if let Err(e) = ws.send(Message::Binary(init_msg.into())).await {
-        eprintln!("Failed to send initial connection message: {}", e);
+    if let Err(e) = ws_sender.send(Message::Binary(init_msg.into())).await {
+        eprintln!("Error sending initial message: {}", e);
         return;
     }
 
-    // Broadcast the user list to all clients
-    // This is done after the initial message to avoid sending an empty list
-    {
-        let mut state_lock = state.lock().await;
-        state_lock.clients.insert(client_id, ws);
-        state_lock.broadcast_user_list().await;
-    }
-
-    let mut ws = {
-        let mut state_lock = state.lock().await;
-        state_lock.clients.remove(&client_id).unwrap()
+    // Get the current user list and send it to the new client
+    let user_list = {
+        let state_lock = state.lock().await;
+        state_lock.get_user_list()
     };
 
-    while let Some(Ok(msg)) = ws.next().await {
-        if msg.is_text() || msg.is_binary() {
-            println!("Received from client {}: {:?}", client_id, msg);
-            ws.send(Message::Text(
-                format!("Echo from server: {}", msg.into_text().unwrap()).into(),
-            ))
-            .await
-            .unwrap();
+    let mut user_list_msg = vec![MessageType::InitialUserList.as_byte()];
+    user_list_msg.extend(user_list.iter().copied());
+    if let Err(e) = ws_sender.send(Message::Binary(user_list_msg.into())).await {
+        eprintln!("Error sending user list: {}", e);
+        return;
+    }
+
+    // Notify other clients about the new user
+    let _ = broadcast_tx.send(ServerMessage::UserJoined(client_id));
+
+    // Create a channel for sending messages to the client
+    let (_client_tx, mut client_rx) = mpsc::channel::<Message>(100);
+    let mut broadcast_rx = broadcast_tx.subscribe();
+
+    let sender_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                // Handle messages from the broadcast channel
+                Ok(msg) = broadcast_rx.recv() => {
+                    match msg {
+                        ServerMessage::UserJoined(id) => {
+                            if id != client_id {
+                                let msg = vec![MessageType::UserJoined.as_byte(), id];
+                                if let Err(e) = ws_sender.send(Message::Binary(msg.into())).await {
+                                    eprintln!("Error sending join message: {}", e);
+                                    break;
+                                }
+                            }
+                        },
+                        ServerMessage::UserLeft(id) => {
+                            if id != client_id {
+                                let msg = vec![MessageType::UserLeft.as_byte(), id];
+                                if let Err(e) = ws_sender.send(Message::Binary(msg.into())).await {
+                                    eprintln!("Error sending leave message: {}", e);
+                                    break;
+                                }
+                            }
+                        },
+                        ServerMessage::UserList(ids) => {
+                            let mut msg = vec![MessageType::InitialUserList.as_byte()];
+                            msg.extend(ids);
+                            if let Err(e) = ws_sender.send(Message::Binary(msg.into())).await {
+                                eprintln!("Error sending user list: {}", e);
+                                break;
+                            }
+                        },
+                        ServerMessage::CursorMoved(id, x, y) => {
+                            if id != client_id {
+                                let mut msg = vec![MessageType::UserMovedCursor.as_byte(), id];
+                                msg.extend_from_slice(&x.to_be_bytes());
+                                msg.extend_from_slice(&y.to_be_bytes());
+                                if let Err(e) = ws_sender.send(Message::Binary(msg.into())).await {
+                                    eprintln!("Error sending cursor message: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                },
+                // Handle messages directly sent to this client
+                Some(msg) = client_rx.recv() => {
+                    if let Err(e) = ws_sender.send(msg).await {
+                        eprintln!("Error sending message to client {}: {}", client_id, e);
+                        break;
+                    }
+                },
+
+                else => break,
+            }
+        }
+
+        println!("Sender task for client {} ended", client_id);
+    });
+
+    // Process incoming messages from the WebSocket
+    while let Some(Ok(msg)) = ws_receiver.next().await {
+        if msg.is_binary() {
+            let data = msg.into_data();
+            if !data.is_empty() {
+                match data[0] {
+                    0x05 => {
+                        // Cursor moved
+                        if data.len() >= 5 {
+                            let x = u16::from_be_bytes([data[1], data[2]]);
+                            let y = u16::from_be_bytes([data[3], data[4]]);
+                            let _ = broadcast_tx.send(ServerMessage::CursorMoved(client_id, x, y));
+                        }
+                    }
+                    // Handle other message types
+                    _ => {}
+                }
+            }
         }
     }
 
     println!("Client {} disconnected", client_id);
 
-    let mut state_lock = state.lock().await;
-    state_lock.unregister(client_id);
+    sender_task.abort();
+
+    {
+        let mut state_lock = state.lock().await;
+        state_lock.unregister(client_id);
+    }
+    let _ = broadcast_tx.send(ServerMessage::UserLeft(client_id));
 }
