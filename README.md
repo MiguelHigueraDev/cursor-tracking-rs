@@ -35,7 +35,7 @@ Clients send a message with the CursorUpdate header (0x5) and the x and y coordi
 ### Local development build
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/cursor-tracking-rs.git
+git clone https://github.com/MiguelHigueraDev/cursor-tracking-rs.git
 cd cursor-tracking-rs
 
 # Build in debug mode
