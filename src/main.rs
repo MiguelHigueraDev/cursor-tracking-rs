@@ -15,6 +15,8 @@ enum ServerMessage {
     UserLeft(ClientId),
     UserList(Vec<ClientId>),
     CursorMoved(ClientId, u16, u16),
+    CursorStartedClicking(ClientId),
+    CursorStoppedClicking(ClientId),
 }
 
 struct SharedState {
@@ -58,6 +60,8 @@ enum MessageType {
     UserJoined = 0x03,
     UserLeft = 0x04,
     UserMovedCursor = 0x05,
+    UserStartedClicking = 0x06,
+    UserStoppedClicking = 0x07,
 }
 
 impl MessageType {
@@ -194,7 +198,25 @@ async fn handle_connection(
                                     break;
                                 }
                             }
-                        }
+                        },
+                        ServerMessage::CursorStartedClicking(id) => {
+                            if id != client_id {
+                                let msg = vec![MessageType::UserStartedClicking.as_byte(), id];
+                                if let Err(e) = send_binary_message(&mut ws_sender, msg).await {
+                                    eprintln!("Error sending cursor click start message: {}", e);
+                                    break;
+                                }
+                            }
+                        },
+                        ServerMessage::CursorStoppedClicking(id) => {
+                            if id != client_id {
+                                let msg = vec![MessageType::UserStoppedClicking.as_byte(), id];
+                                if let Err(e) = send_binary_message(&mut ws_sender, msg).await {
+                                    eprintln!("Error sending cursor click stop message: {}", e);
+                                    break;
+                                }
+                            }
+                        },
                     }
                 },
                 // Handle messages directly sent to this client
@@ -218,15 +240,23 @@ async fn handle_connection(
             let data = msg.into_data();
             if !data.is_empty() {
                 match data[0] {
+                    // Cursor moved
                     0x05 => {
-                        // Cursor moved
                         if data.len() >= 5 {
                             let x = u16::from_be_bytes([data[1], data[2]]);
                             let y = u16::from_be_bytes([data[3], data[4]]);
                             let _ = broadcast_tx.send(ServerMessage::CursorMoved(client_id, x, y));
                         }
                     }
-                    // Handle other message types
+                    // Cursor started clicking
+                    0x06 => {
+                        let _ = broadcast_tx.send(ServerMessage::CursorStartedClicking(client_id));
+                    }
+                    // Cursor stopped clicking
+                    0x07 => {
+                        let _ = broadcast_tx.send(ServerMessage::CursorStoppedClicking(client_id));
+                    }
+                    // Discard other message types
                     _ => {}
                 }
             }
