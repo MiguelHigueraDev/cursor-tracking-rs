@@ -1,0 +1,10 @@
+services:
+  cursor-tracking:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8001:8080"  
+    environment:
+      - RUST_LOG=info
