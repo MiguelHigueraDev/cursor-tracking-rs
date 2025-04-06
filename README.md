@@ -20,6 +20,10 @@ Each message sent by the server contains a header byte to signal the client what
 
 5. CursorUpdate (0x5): Contains the user ID of the user that sent the update, followed by the x and y coordinates of the cursor (2 bytes each, uint16).
 
+6. CursorStartedClicking (0x6): Contains an extra byte with the user ID of the user that started clicking.
+
+7. CursorStoppedClicking (0x7): Contains an extra byte with the user ID of the user that stopped clicking.
+
 Clients send a message with the CursorUpdate header (0x5) and the x and y coordinates to the server every time the cursor moves. The server then broadcasts this message to all connected clients, except the one that sent it.
 
 ## Building from source
