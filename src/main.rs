@@ -71,8 +71,8 @@ async fn main() {
     let state = Arc::new(Mutex::new(SharedState::new()));
     let (broadcast_tx, _) = broadcast::channel::<ServerMessage>(100);
 
-    let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
-    println!("WebSocket server running on ws://127.0.0.1:8080");
+    let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
+    println!("WebSocket server running on ws://0.0.0.0:8080");
 
     while let Ok((stream, addr)) = listener.accept().await {
         let state = Arc::clone(&state);
