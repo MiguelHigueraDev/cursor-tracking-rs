@@ -1,6 +1,6 @@
 # Cursor Tracking server
 
-A WebSocket cursor tracking server written in Rust used for showing live cursors on my [portfolio website](https://miguelhiguera.dev). Currently not implemented in the website.
+A WebSocket cursor tracking server written in Rust used for showing live cursors on my [portfolio website](https://miguelhiguera.dev). You can test it by opening multiple tabs on my website and seeing the cursors move in real time.
  
 It works by exchanging binary messages between client and server.
 
