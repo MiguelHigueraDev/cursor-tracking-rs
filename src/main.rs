@@ -3,7 +3,7 @@ use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, broadcast, mpsc},
+    sync::{Mutex, broadcast},
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
@@ -152,8 +152,7 @@ async fn handle_connection(
     // Notify other clients about the new user
     let _ = broadcast_tx.send(ServerMessage::UserJoined(client_id));
 
-    // Create a channel for sending messages to the client
-    let (_client_tx, mut client_rx) = mpsc::channel::<Message>(100);
+    // Subscribe to the broadcast channel to receive updates from other clients
     let mut broadcast_rx = broadcast_tx.subscribe();
 
     let sender_task = tokio::spawn(async move {
@@ -217,13 +216,6 @@ async fn handle_connection(
                                 }
                             }
                         },
-                    }
-                },
-                // Handle messages directly sent to this client
-                Some(msg) = client_rx.recv() => {
-                    if let Err(e) = ws_sender.send(msg).await {
-                        eprintln!("Error sending message to client {}: {}", client_id, e);
-                        break;
                     }
                 },
 
